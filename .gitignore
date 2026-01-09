@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+*.pyo
+
+# Virtual environments
+venv/
+*/venv/
+.venv/
+*/.venv/
+
+# Results and output
+results/
+*.log
+*.csv
+
+# Cache
+.cache/
+.cache/
+*.cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Hugging Face cache (optional: if storing on disk in project)
+.huggingface/
+transformers_cache/
+torch_cache/
+
+# Jupyter Notebook checkpoints (if you use notebooks)
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files you may not want in Git
+.env
