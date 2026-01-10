@@ -1,0 +1,91 @@
+import asyncio
+import torch
+from dataclasses import dataclass
+from typing import List
+
+
+# Represents a single generation request flowing through the system
+@dataclass
+class GenerationRequest:
+    prompt: str
+    max_new_tokens: int
+    future: asyncio.Future  # where the result will be returned
+
+
+# Global async queue holding incoming requests
+request_queue: asyncio.Queue[GenerationRequest] = asyncio.Queue()
+
+
+async def enqueue_request(prompt: str, max_new_tokens: int):
+    """
+    Called by the FastAPI endpoint.
+    Enqueues a request and waits until the batch worker resolves it.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    req = GenerationRequest(
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        future=future,
+    )
+
+    await request_queue.put(req)
+
+    # Wait until batch_worker sets the result
+    return await future
+
+
+async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int = 20):
+    """
+    Background task:
+    - Pulls requests from the queue
+    - Batches them for a single GPU forward pass
+    - Resolves each request's future
+    """
+    while True:
+        # Wait for at least one request
+        req = await request_queue.get()
+        batch: List[GenerationRequest] = [req]
+
+        start_time = asyncio.get_event_loop().time()
+
+        # Try to fill the batch until size or max_wait_ms is reached
+        while len(batch) < batch_size:
+            elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+            remaining_ms = max_wait_ms - elapsed_ms
+            if remaining_ms <= 0:
+                break
+            try:
+                next_req = await asyncio.wait_for(request_queue.get(), timeout=remaining_ms / 1000)
+                batch.append(next_req)
+            except asyncio.TimeoutError:
+                break
+
+        # Prepare batched input
+        prompts = [r.prompt for r in batch]
+        max_tokens = max(r.max_new_tokens for r in batch)
+
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
+
+        with torch.no_grad():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=True,         # enable sampling
+                top_k=50,               # top-k sampling
+                temperature=0.7,        # randomness
+                pad_token_id=tokenizer.eos_token_id,  # prevents padding issues
+            )
+
+        # Decode outputs and map to requests
+        input_lengths = [len(tokenizer(r.prompt)["input_ids"]) for r in batch]
+
+        for i, req in enumerate(batch):
+            # Only take the newly generated tokens, skip the input prompt
+            generated_ids = output[i][input_lengths[i]:]
+            text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            text = text.lstrip("\n ").rstrip()            # clean output
+            req.future.set_result(text)
+        
+        
