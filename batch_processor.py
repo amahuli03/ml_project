@@ -3,6 +3,9 @@ import torch
 from dataclasses import dataclass
 from typing import List
 
+from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram
+
+
 
 # Represents a single generation request flowing through the system
 @dataclass
@@ -10,6 +13,7 @@ class GenerationRequest:
     prompt: str
     max_new_tokens: int
     future: asyncio.Future  # where the result will be returned
+    enqueue_time: float    # timestamp when request enters the queue
 
 
 # Global async queue holding incoming requests
@@ -28,6 +32,7 @@ async def enqueue_request(prompt: str, max_new_tokens: int):
         prompt=prompt,
         max_new_tokens=max_new_tokens,
         future=future,
+        enqueue_time=asyncio.get_event_loop().time() # timestamp when request enters the queue
     )
 
     await request_queue.put(req)
@@ -42,15 +47,18 @@ async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int =
     - Pulls requests from the queue
     - Batches them for a single GPU forward pass
     - Resolves each request's future
+    - Records Prometheus metrics
     """
     while True:
+        batch: List[GenerationRequest] = []
+
         # Wait for at least one request
         req = await request_queue.get()
-        batch: List[GenerationRequest] = [req]
+        batch.append(req)
 
         start_time = asyncio.get_event_loop().time()
 
-        # Try to fill the batch until size or max_wait_ms is reached
+        # Try to fill the batch until batch_size or max_wait_ms is reached
         while len(batch) < batch_size:
             elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             remaining_ms = max_wait_ms - elapsed_ms
@@ -60,33 +68,41 @@ async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int =
                 next_req = await asyncio.wait_for(request_queue.get(), timeout=remaining_ms / 1000)
                 batch.append(next_req)
             except asyncio.TimeoutError:
-                break
+                break  # time window exceeded, process current batch
+
+        # Measure queue wait time for all requests
+        now = asyncio.get_event_loop().time()
+        for r in batch:
+            wait_time = now - r.enqueue_time
+            queue_wait_time_histogram.observe(wait_time)
+            print(f"Request waited {wait_time:.3f}s in queue")
+
+        # Record batch size
+        batch_size_histogram.observe(len(batch))
 
         # Prepare batched input
         prompts = [r.prompt for r in batch]
         max_tokens = max(r.max_new_tokens for r in batch)
-        batch_size_histogram.observe(len(batch))  # Record batch size for Prometheus
-
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
 
+        # Run inference
         with torch.no_grad():
             output = model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
-                do_sample=True,         # enable sampling
-                top_k=50,               # top-k sampling
-                temperature=0.7,        # randomness
-                pad_token_id=tokenizer.eos_token_id,  # prevents padding issues
+                do_sample=True,
+                top_k=50,
+                temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id,
             )
 
-        # Decode outputs and map to requests
+        # Decode and set results for each request
         input_lengths = [len(tokenizer(r.prompt)["input_ids"]) for r in batch]
-
-        for i, req in enumerate(batch):
-            # Only take the newly generated tokens, skip the input prompt
+        for i, r in enumerate(batch):
             generated_ids = output[i][input_lengths[i]:]
             text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            text = text.lstrip("\n ").rstrip()            # clean output
-            req.future.set_result(text)
+            text = text.lstrip("\n ").rstrip()
+            r.future.set_result(text)
+
         
         

@@ -5,29 +5,17 @@ import torch
 import asyncio
 import time
 from serving.cache import InMemoryCache
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import start_http_server
 from model import load_model
 from batch_processor import enqueue_request, batch_worker  
 import batch_processor
-from prometheus_client import Histogram
+from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram
+
+
 
 app = FastAPI(title="LLM Inference API with Batching")
 
-# Prometheus metrics
-REQUEST_COUNTER = Counter(
-    "llm_generate_requests_total",
-    "Total number of /generate requests"
-)
-REQUEST_LATENCY = Histogram(
-    "llm_generate_request_latency_seconds",
-    "Latency of /generate requests in seconds"
-)
 
-# Track batch sizes processed by the batch_worker
-batch_size_histogram = Histogram(
-    "llm_batch_size",
-    "Number of requests processed in a batch"
-)
 
 # Load the model on startup
 @app.on_event("startup")
