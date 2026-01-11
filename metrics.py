@@ -21,3 +21,6 @@ queue_wait_time_histogram = Histogram(
     "llm_queue_wait_time_seconds",
     "Time each request spends waiting in the queue before being processed"
 )
+
+CACHE_HITS = Counter("llm_cache_hits_total", "Number of cache hits")
+CACHE_MISSES = Counter("llm_cache_misses_total", "Number of cache misses")
