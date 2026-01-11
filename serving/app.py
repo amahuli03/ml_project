@@ -9,6 +9,7 @@ from prometheus_client import Counter, Histogram, start_http_server
 from model import load_model
 from batch_processor import enqueue_request, batch_worker  
 import batch_processor
+from prometheus_client import Histogram
 
 app = FastAPI(title="LLM Inference API with Batching")
 
@@ -20,6 +21,12 @@ REQUEST_COUNTER = Counter(
 REQUEST_LATENCY = Histogram(
     "llm_generate_request_latency_seconds",
     "Latency of /generate requests in seconds"
+)
+
+# Track batch sizes processed by the batch_worker
+batch_size_histogram = Histogram(
+    "llm_batch_size",
+    "Number of requests processed in a batch"
 )
 
 # Load the model on startup

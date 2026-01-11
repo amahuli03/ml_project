@@ -65,6 +65,7 @@ async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int =
         # Prepare batched input
         prompts = [r.prompt for r in batch]
         max_tokens = max(r.max_new_tokens for r in batch)
+        batch_size_histogram.observe(len(batch))  # Record batch size for Prometheus
 
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
 
