@@ -5,13 +5,17 @@ import torch
 import asyncio
 import time
 from serving.cache import InMemoryCache
-
-
+from prometheus_client import start_http_server
 from model import load_model
-from batch_processor import enqueue_request, batch_worker  # your batching code
+from batch_processor import enqueue_request, batch_worker  
 import batch_processor
+from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram, CACHE_HITS, CACHE_MISSES
+
+
 
 app = FastAPI(title="LLM Inference API with Batching")
+
+
 
 # Load the model on startup
 @app.on_event("startup")
@@ -35,6 +39,10 @@ def startup_event():
         )
     )
 
+    # Start Prometheus metrics server on port 8002
+    start_http_server(8002, addr="0.0.0.0")
+    print("Prometheus metrics server started on port 8002 (external)")
+
     print("Model loaded and batch worker started.")
 
 
@@ -50,24 +58,31 @@ class GenerateRequest(BaseModel):
 async def generate(req: GenerateRequest):
     cache = app.state.cache
 
-    # Check cache
-    cached = await cache.get(req.prompt, req.max_new_tokens)
-    if cached is not None:
+    # Increment Prometheus request count
+    REQUEST_COUNTER.inc()
+
+    # Measure latency
+    with REQUEST_LATENCY.time():
+        # Check cache first
+        cached = await cache.get(req.prompt, req.max_new_tokens)
+        if cached is not None:
+            CACHE_HITS.inc()
+            return {
+                "output": cached,
+                "cache_hit": True,
+            }
+
+        # Cache miss → batch inference
+        CACHE_MISSES.inc()
+        result = await enqueue_request(req.prompt, req.max_new_tokens)
+
+        # Store in cache
+        await cache.set(req.prompt, req.max_new_tokens, result)
+
         return {
-            "output": cached,
-            "cache_hit": True,
+            "output": result,
+            "cache_hit": False,
         }
-
-    # Cache miss → batch
-    result = await enqueue_request(req.prompt, req.max_new_tokens)
-
-    # Store result
-    await cache.set(req.prompt, req.max_new_tokens, result)
-
-    return {
-        "output": result,
-        "cache_hit": False,
-    }
 
 
 # Middleware to report request latency
