@@ -4,6 +4,8 @@ from pydantic import BaseModel
 import torch
 import asyncio
 import time
+from serving.cache import InMemoryCache
+
 
 from model import load_model
 from batch_processor import enqueue_request, batch_worker  # your batching code
@@ -21,6 +23,7 @@ def startup_event():
 
     app.state.model = model
     app.state.tokenizer = tokenizer
+    app.state.cache = InMemoryCache()
 
     # 🔑 Pass model + tokenizer into the batch worker
     asyncio.create_task(
@@ -45,7 +48,26 @@ class GenerateRequest(BaseModel):
 
 @app.post("/generate")
 async def generate(req: GenerateRequest):
-    return await enqueue_request(req.prompt, req.max_new_tokens)
+    cache = app.state.cache
+
+    # Check cache
+    cached = await cache.get(req.prompt, req.max_new_tokens)
+    if cached is not None:
+        return {
+            "output": cached,
+            "cache_hit": True,
+        }
+
+    # Cache miss → batch
+    result = await enqueue_request(req.prompt, req.max_new_tokens)
+
+    # Store result
+    await cache.set(req.prompt, req.max_new_tokens, result)
+
+    return {
+        "output": result,
+        "cache_hit": False,
+    }
 
 
 # Middleware to report request latency
