@@ -9,7 +9,7 @@ from prometheus_client import start_http_server
 from model import load_model
 from batch_processor import enqueue_request, batch_worker  
 import batch_processor
-from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram
+from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram, CACHE_HITS, CACHE_MISSES
 
 
 
@@ -39,9 +39,9 @@ def startup_event():
         )
     )
 
-    # Start Prometheus metrics server on port 8001
-    start_http_server(8002)
-    print("Prometheus metrics server started on port 8001")
+    # Start Prometheus metrics server on port 8002
+    start_http_server(8002, addr="0.0.0.0")
+    print("Prometheus metrics server started on port 8002 (external)")
 
     print("Model loaded and batch worker started.")
 
@@ -66,12 +66,14 @@ async def generate(req: GenerateRequest):
         # Check cache first
         cached = await cache.get(req.prompt, req.max_new_tokens)
         if cached is not None:
+            CACHE_HITS.inc()
             return {
                 "output": cached,
                 "cache_hit": True,
             }
 
         # Cache miss → batch inference
+        CACHE_MISSES.inc()
         result = await enqueue_request(req.prompt, req.max_new_tokens)
 
         # Store in cache
