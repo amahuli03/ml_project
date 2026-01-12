@@ -10,10 +10,14 @@ from model import load_model
 from batch_processor import enqueue_request, batch_worker  
 import batch_processor
 from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram, CACHE_HITS, CACHE_MISSES
-
+from serving.load_balancer import RoundRobinLoadBalancer
+from serving.worker import Worker
 
 
 app = FastAPI(title="LLM Inference API with Batching")
+
+# Create load balancer
+load_balancer = RoundRobinLoadBalancer()
 
 
 
@@ -41,6 +45,13 @@ def startup_event():
         )
     )
 
+    # Create multiple workers
+    NUM_WORKERS = 2  # you can increase later
+    for i in range(NUM_WORKERS):
+        worker = Worker(model, tokenizer, worker_id=str(i))
+        load_balancer.register_worker(worker.handle_request)
+
+
     # Start Prometheus metrics server on port 8002
     start_http_server(8002, addr="0.0.0.0")
     print("Prometheus metrics server started on port 8002 (external)")
@@ -67,6 +78,7 @@ async def generate(req: GenerateRequest):
     with REQUEST_LATENCY.time():
         # Check cache first
         cached = await cache.get(req.prompt, req.max_new_tokens)
+        # cached = None  # Disable cache for testing
         if cached is not None:
             CACHE_HITS.inc()
             return {
@@ -74,9 +86,11 @@ async def generate(req: GenerateRequest):
                 "cache_hit": True,
             }
 
+        
+        # Route through load balancer
         # Cache miss → batch inference
         CACHE_MISSES.inc()
-        result = await enqueue_request(req.prompt, req.max_new_tokens)
+        result = await load_balancer.route_request(req.prompt, req.max_new_tokens)
 
         # Store in cache
         await cache.set(req.prompt, req.max_new_tokens, result)

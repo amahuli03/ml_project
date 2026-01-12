@@ -24,3 +24,10 @@ queue_wait_time_histogram = Histogram(
 
 CACHE_HITS = Counter("llm_cache_hits_total", "Number of cache hits")
 CACHE_MISSES = Counter("llm_cache_misses_total", "Number of cache misses")
+
+# Global per-worker request counter
+WORKER_REQUEST_COUNTER = Counter(
+    "llm_worker_requests_total",
+    "Number of requests handled by each worker",
+    ["worker_id"]  # label to differentiate workers
+)
