@@ -27,7 +27,9 @@ def startup_event():
 
     app.state.model = model
     app.state.tokenizer = tokenizer
-    app.state.cache = InMemoryCache()
+    app.state.cache = InMemoryCache(ttl_seconds=300)  # 5 minute TTL
+    # Start background cache cleanup task
+    asyncio.create_task(app.state.cache.start_periodic_cleanup(interval_seconds=60))
 
     # 🔑 Pass model + tokenizer into the batch worker
     asyncio.create_task(
