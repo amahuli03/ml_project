@@ -1,116 +1,67 @@
-# GPU Inference Optimization for Generative Models
+# GPU Inference Optimization — Practical LLM Serving Experiments
 
-This project explores **inference-time optimization techniques** for autoregressive generative models on a single GPU.  
-The goal is to understand how **model-level, kernel-level, and system-level optimizations** affect real-world inference metrics such as **time-to-first-token (TTFT)**, **throughput**, and **GPU memory usage**.
+This project implements an LLM inference service with GPU batching,
+TTL-based caching, and full observability. Autoscaling logic is implemented at the
+application control-plane level, with infrastructure scaling simulated due to
+single-GPU runtime constraints.
 
-## Motivation
+### What this project demonstrates
+- Request batching via a single GPU forward pass to improve throughput.
+- A lightweight in-memory cache to reduce repeated work and measure cache effects on latency.
+- A round-robin load balancer and logical workers to experiment with concurrency/oversubscription.
+- A simple queue-driven autoscaler that adjusts logical workers based on queue depth.
+- End-to-end Prometheus metrics collection and basic experiment scripts for load testing and visualization.
 
-Most ML projects focus on training or model quality.  
-In production systems, however, **inference performance and cost** are often the dominant concerns.
+### Quick architecture summary
+- FastAPI exposes a single POST /generate endpoint which checks cache, then enqueues cache-miss requests.
+- `batch_processor.batch_worker` pulls requests from a global asyncio queue, forms batches (configurable size and max-wait window), runs a GPU generation, and resolves each request's future.
+- `serving/worker.py` provides logical worker handlers registered with the `RoundRobinLoadBalancer`.
+- `serving/autoscaler.py` observes `request_queue` depth and adds/removes logical workers, exposing a Prometheus gauge for active workers.
+- `metrics.py` defines Prometheus metrics for requests, latency, batch sizes, queue wait times, cache hits/misses, and worker activity.
 
-This project was designed to answer questions like:
-- What limits GPU throughput during inference?
-- How do batching and concurrency affect latency?
-- When does autoscaling help — and when does it stop helping?
-- Which optimizations improve throughput vs responsiveness?
+## Quickstart:
 
----
+Prerequisites:
+- Python 3.10+
+- `pip` or `conda`
+- NVIDIA GPU with CUDA support
 
-## System Overview
+Steps:
+1. Create a Python environment and install dependencies:
+   - pip install -r requirements.txt
+2. Run the app locally (development):
+   - uvicorn serving.app:app --host 0.0.0.0 --port 8000 --reload
+3. Load tests and visualizations live in `experiments/`:
+   - python experiments/load_cache_test.py
+   - python experiments/load_test.py
+   - python experiments/visualize_cache_results.py
+4. Metrics: Prometheus metrics are exposed by the app (default port 8002) and can be plotted on Grafana (port 9090).
 
-- **Hardware:** Single NVIDIA GPU (RTX 2000 Ada)
-- **Framework:** PyTorch + Hugging Face Transformers
-- **Execution model:** Python-based inference with async concurrency
-- **Focus:** Autoregressive generation performance
+Configuration tips
+- Model loading is in `model.load_model()`; by default the model is moved to CUDA. For CPU-only testing, remove `.cuda()`.
+- Tune `batch_worker(...)` parameters (`batch_size`, `max_wait_ms`) to trade throughput for latency.
+- Adjust `NUM_WORKERS` and autoscaler settings in `serving/app.py` to study oversubscription effects.
 
-The system is structured as a lightweight inference harness with reusable metric collection and isolated experiment scripts.
+### Key Outcomes
+- End-to-end inference under load
+  - A FastAPI service handled concurrent client requests while batching, caching, and generating model outputs.
+- Real, production-style metrics
+  - The system exports Prometheus metrics for:
+    - Request queue depth
+    - Queue wait time
+    - Batch size distribution
+    - Per-worker request counts
+    - Autoscaler decisions
+- Observable autoscaling behavior
+  - As request concurrency increased:
+    - Queue depth and wait time rose predictably
+    - The autoscaler computed higher desired worker counts
+    - Scaling decisions were visible and explainable in Grafana
+- Controlled performance tradeoffs
+  - By tuning batch size limits and queue wait thresholds, I observed clear tradeoffs between:
+    - Latency vs throughput
+    - Batch efficiency vs tail latency
+    - Cache effectiveness vs compute utilization
 
----
-
-## Metrics
-
-All experiments measure the following inference metrics:
-
-- **Time to First Token (TTFT):**  
-  Time from request submission to the first generated token (user-perceived latency)
-
-- **Latency:**  
-  Total generation time for the request
-
-- **Throughput (tokens/sec):**  
-  GPU efficiency under load
-
-- **Peak VRAM usage:**  
-  Memory footprint during inference
-
-These metrics reflect real production concerns such as **SLA compliance** and **cost efficiency**.
-
----
-
-## Experiments
-
-The following classes of inference optimizations were explored:
-
-### Model-Level Optimizations
-- KV cache reuse
-- Mixed-precision (FP16) inference
-
-### Kernel-Level Optimizations
-- `torch.compile` for kernel fusion and reduced Python overhead
-
-### System-Level Optimizations
-- Static and dynamic batching
-- Concurrency tuning and oversubscription analysis
-- Latency-driven autoscaling simulation
-
-### Capacity Planning
-- Throughput saturation analysis
-- GPU utilization limits under increasing batch size
-
-Each experiment is isolated in the `experiments/` directory and writes structured JSON results to `results/`.
-
----
-
-## Key Results & Insights
-
-Some high-level observations from the experiments:
-
-- **Batching is the largest throughput lever**, but increases TTFT
-- **KV caching significantly reduces per-token latency** during generation
-- **Concurrency has a sweet spot**; oversubscribing the GPU hurts both latency and throughput
-- **Autoscaling improves latency under bursty load**, but benefits plateau on a single GPU
-- **Throughput saturates well before maximum batch sizes**, highlighting the importance of capacity planning
-
-These results illustrate the tradeoffs between **latency, throughput, and resource utilization** in real inference systems.
-
-
-### Table 1: Core Inference Optimizations
-| Optimization  | Latency (s) | TTFT (s) | Tokens/sec | Peak VRAM (MB) |
-| ------------- | ----------- | -------- | ---------- | -------------- |
-| Baseline      | 1.25        | 0.38     | 205.3      | 346.3          |
-| FP16          | 1.29        | 0.45     | 198.5      | 179.3          |
-| KV Cache      | 1.17        | 0.37     | 219.1      | 339.3          |
-| Torch Compile | 1.24        | 0.0066   | 206.8      | 179.3          |
-
-Table 1 shows that KV caching improves throughput and latency moderately, FP16 drastically reduces VRAM usage, and Torch compilation massively reduces time-to-first-token (TTFT). These are the main single-request inference optimizations.
-
-### Table 2: Effect of Batch Size on Throughput and Latency
-| Batch Size | Latency (s) | TTFT (s) | Tokens Generated | Tokens/sec | Peak VRAM (MB) |
-| ---------- | ----------- | -------- | ---------------- | ---------- | -------------- |
-| 1          | 1.25        | 0.38     | 256              | 205        | 346            |
-| 2          | 0.62        | 0.021    | 256              | 414        | 180            |
-| 4          | 0.62        | 0.007    | 512              | 826        | 186            |
-| 8          | 0.62        | 0.0067   | 1024             | 1644       | 198            |
-
-Throughput scales nearly linearly with batch size, while latency and memory usage increase minimally. This illustrates why batching is critical for efficient GPU utilization in LLM serving.
-
-### Table 3: Impact of Worker Concurrency (Oversubscription)
-| Workers | Avg Latency (s) | Avg TTFT (s) | Avg Tokens/sec | Avg Peak VRAM (MB) |
-| ------- | --------------- | ------------ | -------------- | ------------------ |
-| 1       | 0.59            | 0.40         | 215            | 334                |
-| 2       | 1.24            | 0.022        | 103            | 349                |
-| 4       | 4.74            | 0.055        | 27             | 376                |
-| 8       | 10.81           | 0.11         | 11.8           | 432                |
-
-Adding more workers to a single GPU beyond 1 dramatically reduces throughput and increases latency due to oversubscription and memory contention. Highlights why careful scheduling and batching is better than naive parallelism.
-
+## License
+This project is released under the MIT License. See the bundled `LICENSE` file for the full text and permissions.
