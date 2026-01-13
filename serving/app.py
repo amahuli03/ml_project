@@ -10,12 +10,15 @@ from model import load_model
 from batch_processor import enqueue_request, batch_worker  
 import batch_processor
 from metrics import REQUEST_COUNTER, REQUEST_LATENCY, batch_size_histogram, queue_wait_time_histogram, CACHE_HITS, CACHE_MISSES
-
+from serving.load_balancer import RoundRobinLoadBalancer
+from serving.worker import Worker
+from serving.autoscaler import AutoScaler
 
 
 app = FastAPI(title="LLM Inference API with Batching")
 
-
+# Create load balancer
+load_balancer = RoundRobinLoadBalancer()
 
 # Load the model on startup
 @app.on_event("startup")
@@ -27,20 +30,33 @@ def startup_event():
 
     app.state.model = model
     app.state.tokenizer = tokenizer
-    app.state.cache = InMemoryCache()
+    app.state.cache = InMemoryCache(ttl_seconds=300)  # 5 minute TTL
+    # Start background cache cleanup task
+    asyncio.create_task(app.state.cache.start_periodic_cleanup(interval_seconds=60))
+    
+    # Start autoscaler
+    app.state.autoscaler = AutoScaler(model, tokenizer, initial_workers=1)
+    asyncio.create_task(app.state.autoscaler.monitor())
 
     # 🔑 Pass model + tokenizer into the batch worker
     asyncio.create_task(
         batch_worker(
             model=app.state.model,
             tokenizer=app.state.tokenizer,
-            batch_size=1,
-            max_wait_ms=20,
+            batch_size=4,
+            max_wait_ms=200,
         )
     )
 
+    # Create multiple workers
+    NUM_WORKERS = 2  # you can increase later
+    for i in range(NUM_WORKERS):
+        worker = Worker(model, tokenizer, worker_id=str(i))
+        load_balancer.register_worker(worker.handle_request)
+
+
     # Start Prometheus metrics server on port 8002
-    start_http_server(8002, addr="0.0.0.0")
+    start_http_server(8002, "0.0.0.0")
     print("Prometheus metrics server started on port 8002 (external)")
 
     print("Model loaded and batch worker started.")
@@ -65,6 +81,7 @@ async def generate(req: GenerateRequest):
     with REQUEST_LATENCY.time():
         # Check cache first
         cached = await cache.get(req.prompt, req.max_new_tokens)
+        # cached = None  # Disable cache for testing
         if cached is not None:
             CACHE_HITS.inc()
             return {
@@ -72,9 +89,11 @@ async def generate(req: GenerateRequest):
                 "cache_hit": True,
             }
 
+        
+        # Route through load balancer
         # Cache miss → batch inference
         CACHE_MISSES.inc()
-        result = await enqueue_request(req.prompt, req.max_new_tokens)
+        result = await load_balancer.route_request(req.prompt, req.max_new_tokens)
 
         # Store in cache
         await cache.set(req.prompt, req.max_new_tokens, result)
