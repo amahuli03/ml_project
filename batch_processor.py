@@ -40,8 +40,8 @@ async def enqueue_request(prompt: str, max_new_tokens: int):
     # Wait until batch_worker sets the result
     return await future
 
-
-async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int = 20):
+# max_wait_time_ms is 500 for testing, bring back to 20 after
+async def batch_worker(model, tokenizer, batch_size: int = 1, max_wait_ms: int = 500):
     """
     Background task:
     - Pulls requests from the queue

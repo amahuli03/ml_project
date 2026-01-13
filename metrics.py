@@ -1,4 +1,5 @@
 from prometheus_client import Histogram, Counter
+from prometheus_client import Gauge
 
 # Prometheus metrics
 REQUEST_COUNTER = Counter(
@@ -30,4 +31,10 @@ WORKER_REQUEST_COUNTER = Counter(
     "llm_worker_requests_total",
     "Number of requests handled by each worker",
     ["worker_id"]  # label to differentiate workers
+)
+
+# Tracks number of active workers (logical)
+ACTIVE_WORKERS = Gauge(
+    "llm_active_workers",
+    "Number of active logical workers"
 )

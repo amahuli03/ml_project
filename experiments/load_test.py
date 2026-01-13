@@ -25,10 +25,10 @@ async def send_request(session, prompt):
 async def client_task(client_id):
     async with aiohttp.ClientSession() as session:
         for i in range(NUM_REQUESTS_PER_CLIENT):
-            prompt = f"Client {client_id} request {i}"
+            prompt = f"Prompt {i % 3}"  # 3 repeating prompts to generate cache hits
             res = await send_request(session, prompt)
             results.append(res)
-            await asyncio.sleep(0.05)  # small gap between requests
+            # no sleep to create bursts
 
 async def main():
     tasks = [asyncio.create_task(client_task(i)) for i in range(NUM_CLIENTS)]
